@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body { font-family: 'Sarabun', sans-serif; padding: 15px; background: #f8f9fa; }
+      h3 { color: #202124; margin-top: 0; }
+      .item { border: 1px solid #dadce0; padding: 15px; margin-bottom: 15px; border-radius: 8px; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
+      .header { font-weight: bold; color: #d93025; font-size: 1.1em; margin-bottom: 5px; }
+      .detail { margin: 3px 0; color: #3c4043; }
+      .reason { background: #fff8e1; padding: 5px; border-left: 4px solid #fbbc04; margin: 10px 0; font-size: 0.9em; color: #856404; }
+      .ids { font-size: 0.75em; color: #9aa0a6; margin-bottom: 10px; font-family: monospace; }
+      .actions { margin-top: 10px; border-top: 1px solid #eee; pt: 10px; }
+      .btn { padding: 8px 16px; margin-right: 8px; cursor: pointer; border: none; border-radius: 4px; color: white; font-weight: bold; transition: 0.2s; }
+      .btn-approve { background-color: #188038; }
+      .btn-approve:hover { background-color: #137333; }
+      .btn-reject { background-color: #d93025; }
+      .btn-reject:hover { background-color: #c5221f; }
+      .btn:disabled { background-color: #ccc; cursor: not-allowed; }
+      input[type="text"] { width: 100%; padding: 8px; margin: 8px 0; border: 1px solid #dadce0; border-radius: 4px; box-sizing: border-box; }
+      .loading { text-align: center; padding: 20px; color: #5f6368; }
+      .empty { text-align: center; padding: 20px; color: #188038; font-weight: bold; }
+    </style>
+  </head>
+  <body>
+    <h3>🛑 จัดการรายการติดขัด (Conflict Queue)</h3>
+    <div id="content" class="loading">กำลังโหลดรายการ...</div>
+
+    <script>
+      window.onload = function() {
+        google.script.run.withSuccessHandler(renderItems).V5_GetConflictItems();
+      };
+
+      function renderItems(items) {
+        const div = document.getElementById('content');
+        if (!items || items.length === 0) {
+          div.innerHTML = '<div class="empty">✅ เยี่ยมมาก! ไม่มีรายการติดขัดค้างอยู่</div>';
+          return;
+        }
+
+        let html = '';
+        items.forEach(item => {
+          html += `
+            <div class="item" id="row-${item.rowIndex}">
+              <div class="header">📍 ชื่อปลายทาง: ${item.name}</div>
+              <div class="detail">🗺️ พิกัด: <code>${item.latLong}</code></div>
+              <div class="detail">🏠 ที่อยู่: ${item.address || '-'}</div>
+              
+              <div class="reason">⚠️ เหตุผลที่ติดขัด: ${item.reason}</div>
+              
+              <div class="ids">
+                Entity ID: ${item.suggestedEntId}<br>
+                Location ID: ${item.suggestedLocId}
+              </div>
+
+              <input type="text" id="note-${item.rowIndex}" placeholder="📝 หมายเหตุเพิ่มเติม (ถ้ามี)...">
+              
+              <div class="actions">
+                <button class="btn btn-approve" onclick="resolve(${item.rowIndex}, 'APPROVE', this)">✅ อนุมัติ (เชื่อมโยงข้อมูล)</button>
+                <button class="btn btn-reject" onclick="resolve(${item.rowIndex}, 'REJECT', this)">❌ ปฏิเสธ (ไม่เชื่อมโยง)</button>
+              </div>
+            </div>
+          `;
+        });
+        div.innerHTML = html;
+      }
+
+      function resolve(rowIndex, action, btnElement) {
+        const note = document.getElementById('note-' + rowIndex).value;
+        const parent = btnElement.parentElement.parentElement;
+        const buttons = parent.querySelectorAll('button');
+        
+        // Disable all buttons in this card
+        buttons.forEach(b => b.disabled = true);
+        const originalText = btnElement.innerText;
+        btnElement.innerText = "กำลังบันทึก...";
+
+        google.script.run.withSuccessHandler(function(res) {
+          if (res === 'success') {
+            parent.style.background = action === 'APPROVE' ? '#e6f4ea' : '#fce8e6';
+            parent.style.borderLeft = "5px solid " + (action === 'APPROVE' ? "#188038" : "#d93025");
+            
+            let statusIcon = action === 'APPROVE' ? '✅' : '❌';
+            parent.querySelector('.actions').innerHTML = `<b>${statusIcon} ดำเนินการแล้ว: ${action === 'APPROVE' ? 'อนุมัติการเชื่อมโยง' : 'ปฏิเสธ'}</b>`;
+            if(note) parent.querySelector('.actions').innerHTML += `<br><small>หมายเหตุ: ${note}</small>`;
+            
+            // Refresh list after 2 seconds to show remaining items
+            setTimeout(() => {
+               google.script.run.withSuccessHandler(renderItems).V5_GetConflictItems();
+            }, 1500);
+          } else {
+            alert('เกิดข้อผิดพลาดในการบันทึก');
+            buttons.forEach(b => b.disabled = false);
+            btnElement.innerText = originalText;
+          }
+        }).V5_ResolveConflict(rowIndex, action, note);
+      }
+    </script>
+  </body>
+</html>
