@@ -1,164 +1,103 @@
 /**
  * V5_Service_ConflictManager.gs
  * Version: 5.0
- * Description: Manages the Conflict Queue with a simple UI to Approve/Reject suggestions.
+ * Description: Handles the Conflict Queue logic and serves data to the HTML UI.
  */
 
+/**
+ * แสดงหน้าต่าง UI จัดการ Conflict
+ */
 function V5_ShowConflictQueueUI() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const queueSheet = ss.getSheetByName(V5_CONFIG.SHEETS.CONFLICT_QUEUE);
-  
-  if (!queueSheet || queueSheet.getLastRow() < 2) {
-    Browser.msgBox("✅ ไม่มีรายการติดขัดในคิว (Conflict Queue ว่าง)");
-    return;
-  }
-
   const html = HtmlService.createHtmlOutputFromFile('ConflictQueueUI')
-      .setWidth(800)
-      .setHeight(600);
-  SpreadsheetApp.getUi().showModalDialog(html, 'จัดการรายการติดขัด (Conflict Queue)');
+      .setWidth(600)
+      .setHeight(500)
+      .setTitle('จัดการรายการติดขัด');
+  SpreadsheetApp.getUi().showModalDialog(html, 'Conflict Queue Manager');
 }
 
-function V5_GetConflictItems() {
+/**
+ * ดึงข้อมูลจากชีต Conflict_Queue เพื่อส่งให้ UI
+ * @returns {Array} Array of objects containing queue details
+ */
+function V5_GetConflictQueueData() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const queueSheet = ss.getSheetByName(V5_CONFIG.SHEETS.CONFLICT_QUEUE);
-  const data = queueSheet.getDataRange().getValues();
-  const headers = data[0];
-  const items = [];
-
-  // กรองเฉพาะแถวที่ยังไม่ถูกแก้ไข (Action_Required = REVIEW_REQUIRED)
-  const colAction = headers.indexOf("Action_Required") + 1;
+  const sheet = ss.getSheetByName(V5_CONFIG.SHEETS.CONFLICT_QUEUE);
   
+  if (!sheet || sheet.getLastRow() < 2) return [];
+
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  
+  // หา Index คอลัมน์
+  const col = {
+    id: headers.indexOf("Queue_ID") + 1,
+    name: headers.indexOf("Incoming_Name") + 1,
+    latlng: headers.indexOf("Incoming_LatLong") + 1,
+    address: headers.indexOf("Incoming_Address") + 1,
+    reason: headers.indexOf("Conflict_Reason") + 1,
+    entId: headers.indexOf("Suggested_Entity_ID") + 1,
+    locId: headers.indexOf("Suggested_Location_ID") + 1,
+    status: headers.indexOf("Action_Required") + 1
+  };
+
+  const queueItems = [];
+  
+  // วนลูปเฉพาะแถวที่ยังสถานะเป็น REVIEW_REQUIRED
   for (let i = 1; i < data.length; i++) {
-    if (data[i][colAction - 1] === "REVIEW_REQUIRED") {
-      items.push({
-        rowIndex: i + 1,
-        id: data[i][0],
-        name: data[i][2],
-        latLong: data[i][3],
-        address: data[i][4],
-        suggestedEntId: data[i][5],
-        suggestedLocId: data[i][6],
-        reason: data[i][7]
+    if (data[i][col.status - 1] === "REVIEW_REQUIRED") {
+      queueItems.push({
+        rowId: i + 1, // เก็บเลขแถวจริงไว้สำหรับอัปเดต
+        id: data[i][col.id - 1],
+        name: data[i][col.name - 1],
+        latlng: data[i][col.latlng - 1],
+        address: data[i][col.address - 1],
+        reason: data[i][col.reason - 1],
+        entityId: data[i][col.entId - 1],
+        locId: data[i][col.locId - 1]
       });
     }
   }
-  return items;
+  
+  return queueItems;
 }
 
-function V5_ResolveConflict(rowIndex, action, note) {
+/**
+ * ประมวลผลเมื่อกดปุ่มใน UI (Approve/Reject)
+ * @param {number} rowIndex - Index ใน Array ที่ส่งไป (ต้องแปลงเป็นแถวจริง)
+ * @param {string} action - 'APPROVE' หรือ 'REJECT'
+ */
+function V5_ProcessConflictAction(arrayIndex, action) {
+  // เนื่องจาก HTML ส่ง index ของ Array มา เราต้องดึงข้อมูลใหม่เพื่อหาแถวจริง
+  // วิธีที่ปลอดภัยคือดึงข้อมูลทั้งหมดมาใหม่อีกครั้งเพื่อจับคู่
+  const currentQueue = V5_GetConflictQueueData();
+  
+  if (arrayIndex >= currentQueue.length) return currentQueue; // Out of sync
+  
+  const item = currentQueue[arrayIndex];
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const queueSheet = ss.getSheetByName(V5_CONFIG.SHEETS.CONFLICT_QUEUE);
+  const sheet = ss.getSheetByName(V5_CONFIG.SHEETS.CONFLICT_QUEUE);
   const mapSheet = ss.getSheetByName(V5_CONFIG.SHEETS.MAP);
+  const realRow = item.rowId;
+
   const user = Session.getActiveUser().getEmail();
   const now = new Date();
 
-  const headers = queueSheet.getRange(1, 1, 1, queueSheet.getLastColumn()).getValues()[0];
-  const colAction = headers.indexOf("Action_Required") + 1;
-  const colResolvedBy = headers.indexOf("Resolved_By") + 1;
-  const colResolvedAt = headers.indexOf("Resolved_At") + 1;
-  const colNote = headers.indexOf("Resolution_Note") + 1;
-  const colEntId = headers.indexOf("Suggested_Entity_ID") + 1;
-  const colLocId = headers.indexOf("Suggested_Location_ID") + 1;
-
-  const row = queueSheet.getRange(rowIndex, 1, 1, queueSheet.getLastColumn()).getValues()[0];
-  const entId = row[colEntId - 1];
-  const locId = row[colLocId - 1];
-
-  if (action === "APPROVE") {
-    // อนุมัติ: สร้างความสัมพันธ์ใน Map Sheet
-    V5_CreateMapRelation(mapSheet, entId, locId, "MANUAL_APPROVED");
-    queueSheet.getRange(rowIndex, colAction).setValue("APPROVED");
-  } else if (action === "REJECT") {
-    // ปฏิเสธ: แค่บันทึกสถานะ
-    queueSheet.getRange(rowIndex, colAction).setValue("REJECTED");
+  if (action === 'APPROVE') {
+    // 1. สร้างความสัมพันธ์ใน Entity_Loc_Map
+    V5_CreateMapRelation(mapSheet, item.entityId, item.locId, "MANUAL_APPROVED");
+    
+    // 2. อัปเดตสถานะใน Queue เป็น APPROVED
+    sheet.getRange(realRow, sheet.getHeaderRows() + 1).setValue("APPROVED_BY_USER"); // Action_Required
+    sheet.getRange(realRow, sheet.getHeaderRows() + 2).setValue(user); // Resolved_By (สมมติคอลัมน์ถัดไป)
+    sheet.getRange(realRow, sheet.getHeaderRows() + 3).setValue(now);   // Resolved_At
+  } else {
+    // REJECT / IGNORE
+    // แค่เปลี่ยนสถานะ ไม่สร้างความสัมพันธ์
+    sheet.getRange(realRow, sheet.getHeaderRows() + 1).setValue("REJECTED_BY_USER");
+    sheet.getRange(realRow, sheet.getHeaderRows() + 2).setValue(user);
+    sheet.getRange(realRow, sheet.getHeaderRows() + 3).setValue(now);
   }
 
-  // อัปเดตข้อมูลผู้แก้ไขและหมายเหตุ
-  queueSheet.getRange(rowIndex, colResolvedBy).setValue(user);
-  queueSheet.getRange(rowIndex, colResolvedAt).setValue(now);
-  queueSheet.getRange(rowIndex, colNote).setValue(note || "");
-
-  return "success";
-}
-
-// สร้างไฟล์ HTML แบบ Inline สำหรับ UI ง่ายๆ (ไม่ต้องสร้างไฟล์ .html แยก)
-function createConflictUIHtml() {
-  const htmlContent = `
-    <!DOCTYPE html>
-    <html>
-      <head>
-        <base target="_top">
-        <style>
-          body { font-family: sans-serif; padding: 10px; }
-          .item { border: 1px solid #ccc; padding: 10px; margin-bottom: 10px; border-radius: 5px; background: #fff; }
-          .header { font-weight: bold; color: #d93025; }
-          .btn { padding: 8px 15px; margin: 5px; cursor: pointer; border: none; border-radius: 3px; color: white; }
-          .btn-approve { background-color: #188038; }
-          .btn-reject { background-color: #d93025; }
-          .btn:hover { opacity: 0.9; }
-          input[type="text"] { width: 90%; padding: 5px; margin-top: 5px; }
-          .loading { text-align: center; color: #666; }
-        </style>
-      </head>
-      <body>
-        <h3>🛑 รายการติดขัดที่ต้องตรวจสอบ</h3>
-        <div id="content">กำลังโหลด...</div>
-
-        <script>
-          window.onload = function() {
-            google.script.run.withSuccessHandler(renderItems).V5_GetConflictItems();
-          };
-
-          function renderItems(items) {
-            const div = document.getElementById('content');
-            if (items.length === 0) {
-              div.innerHTML = '<p>✅ ไม่มีรายการค้างชำระ</p>';
-              return;
-            }
-
-            let html = '';
-            items.forEach(item => {
-              html += \`
-                <div class="item">
-                  <div class="header">ชื่อ: \${item.name}</div>
-                  <div>พิกัด: \${item.latLong}</div>
-                  <div>ที่อยู่: \${item.address}</div>
-                  <div style="color:#666; font-size:0.9em;">เหตุผล: \${item.reason}</div>
-                  <div style="font-size:0.8em; color:#888;">Entity ID: \${item.suggestedEntId}<br>Loc ID: \${item.suggestedLocId}</div>
-                  <input type="text" id="note-\${item.rowIndex}" placeholder="หมายเหตุ (ถ้ามี)">
-                  <br>
-                  <button class="btn btn-approve" onclick="resolve(\${item.rowIndex}, 'APPROVE')">✅ อนุมัติ (เชื่อมโยง)</button>
-                  <button class="btn btn-reject" onclick="resolve(\${item.rowIndex}, 'REJECT')">❌ ปฏิเสธ</button>
-                </div>
-              \`;
-            });
-            div.innerHTML = html;
-          }
-
-          function resolve(rowIndex, action) {
-            const note = document.getElementById('note-' + rowIndex).value;
-            const btns = event.target.parentElement.querySelectorAll('button');
-            btns.forEach(b => b.disabled = true);
-            event.target.innerText = "กำลังบันทึก...";
-
-            google.script.run.withSuccessHandler(function(res) {
-              if (res === 'success') {
-                event.target.parentElement.parentElement.style.background = action === 'APPROVE' ? '#e6f4ea' : '#fce8e6';
-                event.target.parentElement.innerHTML = '<b>ดำเนินการแล้ว:</b> ' + action;
-                // โหลดใหม่ทั้งหมดเพื่อให้เห็นความเปลี่ยนแปลง
-                setTimeout(() => google.script.run.withSuccessHandler(renderItems).V5_GetConflictItems(), 1000);
-              }
-            }).V5_ResolveConflict(rowIndex, action, note);
-          }
-        </script>
-      </body>
-    </html>
-  `;
-  
-  // บันทึกลงไฟล์ HTML จริงเพื่อให้เรียกใช้ได้
-  // หมายเหตุ: ใน Apps Script เราต้องสร้างไฟล์ .html แยก หรือใช้วิธีสร้าง Blob
-  // เพื่อความง่ายในคู่มือนี้ ผมจะแนะนำให้คุณสร้างไฟล์ HTML ชื่อ 'ConflictQueueUI.html' 
-  // แล้ววางโค้ดด้านล่างนี้แทนครับ (ดูขั้นตอนถัดไป)
-  return htmlContent;
+  // ส่ง返回列表ที่อัปเดตแล้วกลับไปให้ UI แสดงผลใหม่
+  return V5_GetConflictQueueData();
 }
