@@ -118,35 +118,50 @@ const V5_CONFIG = {
   },
 
   // ---------------------------------------------------------------------------
-  // 3. ค่าคงที่ระบบ (System Constants)
+  // 3. SYSTEM CONSTANTS & THRESHOLDS
   // ---------------------------------------------------------------------------
   SYSTEM: {
-    CONFIDENCE_AUTO_ACCEPT: 90,      // คะแนนความมั่นใจขั้นต่ำที่จะเชื่อมอัตโนมัติ (%)
-    DISTANCE_THRESHOLD_M: 200,       // ระยะทางสูงสุด (เมตร) ที่จะถือว่าเป็นที่เดียวกัน
-    MAX_RETRY_API: 3,                // จำนวนครั้งสูงสุดในการลองเรียก API
-    BATCH_SIZE: 50                   // จำนวนแถวที่ประมวลผลต่อรอบ (เพื่อป้องกัน Timeout)
+    // เกณฑ์ความมั่นใจในการจับคู่อัตโนมัติ (0-100)
+    CONFIDENCE_AUTO_ACCEPT: 90, 
+    
+    // เกณฑ์ระยะทาง (เมตร) ในการถือว่าอยู่ในจุดเดียวกัน
+    DISTANCE_THRESHOLD_METERS: 150, 
+    
+    // จำนวนทศนิยมของพิกัดสำหรับการสร้าง Key (6 ตำแหน่ง ≈ 10 ซม.)
+    LAT LNG_DECIMAL_PLACES: 6,
+    
+    // ค่าเริ่มต้นสถานะ
+    DEFAULT_STATUS: "ACTIVE",
+    DEFAULT_RELATION: "PRIMARY",
+    
+    // การตั้งค่า AI (ถ้ามีใช้ในอนาคต)
+    AI_MODEL: "gemini-pro",
+    AI_TIMEOUT_MS: 30000
   },
 
   // ---------------------------------------------------------------------------
-  // 4. ฟังก์ชันตรวจสอบความถูกต้องของระบบ (System Integrity Check)
+  // 4. HELPER METHODS (ภายใน Config)
   // ---------------------------------------------------------------------------
+  
+  /**
+   * ตรวจสอบว่าชีตสำคัญมีครบหรือไม่
+   * @returns {boolean} true ถ้าครบ, false ถ้าขาด
+   */
   validateSystemIntegrity: function() {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const requiredSheets = Object.values(this.SHEETS);
     let missing = [];
-
-    requiredSheets.forEach(name => {
-      if (!ss.getSheetByName(name)) {
-        missing.push(name);
+    
+    for (let sheetName of requiredSheets) {
+      if (!ss.getSheetByName(sheetName)) {
+        missing.push(sheetName);
       }
-    });
-
-    if (missing.length > 0) {
-      Logger.log("⚠️ พบชีตที่ขาดหาย: " + missing.join(", "));
-      return { valid: false, missing: missing };
     }
     
-    Logger.log("✅ ระบบพร้อมใช้งาน: พบชีตครบทั้ง " + requiredSheets.length + " ชีต");
-    return { valid: true };
+    if (missing.length > 0) {
+      Logger.log("⚠️ Missing Sheets: " + missing.join(", "));
+      return false;
+    }
+    return true;
   }
 };
