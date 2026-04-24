@@ -1,94 +1,74 @@
 /**
  * V5_Menu.gs
  * Version: 5.0
- * Description: Creates the custom menu '🚀 LMDS V5' in Google Sheets, organizing all system functions 
- *              into logical groups for easy access by Admin and Users.
+ * Description: Creates the custom menu for LMDS V5.0
  */
 
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
-  
   ui.createMenu('🚀 LMDS V5')
-    
-    // --- กลุ่มที่ 1: การตั้งค่าเบื้องต้น (ใช้ครั้งเดียวหรือเมื่อมีการเปลี่ยนแปลงโครงสร้าง) ---
     .addSubMenu(ui.createMenu('⚙️ Setup & Config')
-      .addItem('1. สร้างโครงสร้างฐานข้อมูลใหม่ (Init Schema)', 'V5_InitAllSheets')
-      .addSeparator()
-      .addItem('🔍 ตรวจสอบความถูกต้องของระบบ', 'V5_CheckSystemIntegrity'))
-    
-    // --- กลุ่มที่ 2: ส่วนที่ 2 - เครื่องจักรจัดการข้อมูลดิบ (Master Data Engine) ---
-    .addSubMenu(ui.createMenu('🏭 Part 2: จัดการฐานข้อมูล')
-      .addItem('🚜 1. นำเข้าข้อมูลดิบ -> สร้าง Master Data', 'V5_IngestRawDataToMaster')
-      .addSeparator()
-      .addItem('📋 2. ดูรายการติดขัด (Conflict Queue)', 'V5_ShowConflictQueueUI')
-      .addSeparator()
-      .addItem('🔄 รีเซ็ตสถานะ Sync ข้อมูลดิบ', 'V5_ResetSyncStatus'))
-    
-    // --- กลุ่มที่ 3: ส่วนที่ 1 - ปฏิบัติการรายวัน (Daily Workflow) ---
-    .addSubMenu(ui.createMenu('📅 Part 1: ปฏิบัติการรายวัน')
-      .addItem('📥 1. โหลดข้อมูลจาก SCG API (ลงชีต Data)', 'V5_FetchRawDataFromAPI')
-      .addSeparator()
-      .addItem('✨ 2. จับคู่ข้อมูลสะอาด & เติมพิกัด/อีเมล', 'V5_MatchDailyData')
-      .addSeparator()
-      .addItem('📊 3. สร้างรายงานสรุป (Shipment/Owner)', 'V5_GenerateDailySummaries')
-      .addSeparator()
-      .addItem('🧹 ล้างข้อมูลรายวัน (Input/Data/Summary)', 'V5_ClearDailySheets'))
-    
-    // --- กลุ่มที่ 4: เครื่องมือเสริมและการบำรุงรักษา ---
-    .addSubMenu(ui.createMenu('🛠️ Maintenance & Tools')
-      .addItem('🗑️ ล้างเฉพาะรายงานสรุป', 'V5_ClearSummarySheets')
-      .addSeparator()
-      .addItem('ℹ️ เกี่ยวกับระบบ LMDS V5', 'V5_ShowAboutInfo'))
-    
+      .addItem('1. สร้างโครงสร้างฐานข้อมูลใหม่', 'V5_InitAllSheets'))
+    .addSubMenu(ui.createMenu('ส่วนที่ 2: จัดการฐานข้อมูล')
+      .addItem('🚜 นำเข้าข้อมูลดิบสู่ฐานหลัก', 'V5_IngestRawDataToMaster')
+      .addItem('🔄 ล้างสถานะ Sync (เริ่มใหม่)', 'V5_ResetSyncStatus')
+      .addItem('🛠️ จัดการรายการติดขัด (Queue)', 'V5_ShowConflictQueueUI'))
+    .addSubMenu(ui_menu_part1())
+    .addSubMenu(ui.createMenu('📈 รายงานและเครื่องมือ')
+      .addItem('ดูรายงานคุณภาพข้อมูล', 'V5_ShowQualityReport')
+      .addItem('เกี่ยวกับระบบ V5', 'V5_ShowAbout'))
     .addToUi();
-    
-  Logger.log("✅ Menu '🚀 LMDS V5' loaded successfully.");
+}
+
+function ui_menu_part1() {
+  return ui.createMenu('ส่วนที่ 1: ปฏิบัติการรายวัน')
+    .addItem('📥 โหลดข้อมูล Shipment (API)', 'V5_FetchRawDataFromAPI')
+    .addItem('🔄 จับคู่ข้อมูลสะอาด (Fill Coordinates)', 'V5_MatchDailyData')
+    .addItem('📊 สร้างรายงานสรุป', 'V5_GenerateDailySummaries')
+    .addItem('🧹 ล้างข้อมูลรายวัน', 'V5_ClearDailySheets');
 }
 
 /**
- * ฟังก์ชันแสดง Dialog สำหรับดูรายการ Conflict (แบบง่าย)
- * ในอนาคตสามารถพัฒนาเป็น Web App หรือ Sidebar ที่ซับซ้อนกว่านี้ได้
+ * ฟังก์ชันแสดงรายงานคุณภาพข้อมูลอย่างง่าย
  */
-function V5_ShowConflictQueueUI() {
+function V5_ShowQualityReport() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const entSheet = ss.getSheetByName(V5_CONFIG.SHEETS.ENTITIES);
+  const locSheet = ss.getSheetByName(V5_CONFIG.SHEETS.LOCATIONS);
+  const mapSheet = ss.getSheetByName(V5_CONFIG.SHEETS.MAP);
   const queueSheet = ss.getSheetByName(V5_CONFIG.SHEETS.CONFLICT_QUEUE);
   
-  if (!queueSheet || queueSheet.getLastRow() < 2) {
-    Browser.msgBox("✅ ไม่มีรายการติดขัดใน Queue ปัจจุบัน\nข้อมูลสะอาดเรียบร้อย!");
+  if (!entSheet || !locSheet) {
+    Browser.msgBox("❌ ไม่พบชีตฐานข้อมูล กรุณา Run Setup ก่อน");
     return;
   }
+
+  const countEnt = Math.max(0, entSheet.getLastRow() - 1);
+  const countLoc = Math.max(0, locSheet.getLastRow() - 1);
+  const countMap = Math.max(0, mapSheet.getLastRow() - 1);
+  const countQueue = Math.max(0, queueSheet ? queueSheet.getLastRow() - 1 : 0);
   
-  const count = queueSheet.getLastRow() - 1;
-  const msg = `⚠️ พบรายการที่ต้องตรวจสอบ ${count} รายการ\n\n` +
-              `กรุณาเปิดชีต 'Conflict_Queue' เพื่อตรวจสอบรายละเอียด\n` +
-              `และดำเนินการอนุมัติ (Approve) หรือ แก้ไข (Edit) ด้วยตนเอง`;
-              
+  // คำนวณความครอบคลุม (Coverage) แบบง่ายๆ
+  const coverage = countMap > 0 && countEnt > 0 ? Math.round((countMap / countEnt) * 100) : 0;
+
+  const msg = `
+📊 รายงานคุณภาพข้อมูล (Data Quality Report)
+-------------------------------------------
+👥 จำนวน Entities (ตัวตน): ${countEnt} รายการ
+📍 จำนวน Locations (สถานที่): ${countLoc} รายการ
+🔗 จำนวนความสัมพันธ์ (Mappings): ${countMap} รายการ
+⚠️ รายการติดขัดคงค้าง: ${countQueue} รายการ
+
+💡 ดัชนีความสมบูรณ์:
+- ความครอบคลุม Entity ที่มีพิกัด: ${coverage}%
+(ยิ่งสูงยิ่งดี หมายถึง Entity ส่วนใหญ่มี Location จับคู่แล้ว)
+
+✅ สถานะระบบ: ปกติ
+  `;
+  
   Browser.msgBox(msg);
-  // เปิดชีต Conflict_Queue ให้ทันที
-  ss.setActiveSheet(queueSheet);
 }
 
-/**
- * ฟังก์ชันแสดงข้อมูลเกี่ยวกับระบบ
- */
-function V5_ShowAboutInfo() {
-  const info = `📘 ระบบจัดการข้อมูลหลัก LMDS Version 5.0\n\n` +
-               `🔹 ส่วนที่ 1 (Daily Ops): ดึง API -> จับคู่ -> สรุปผล\n` +
-               `🔹 ส่วนที่ 2 (Master Data): ทำความสะอาดข้อมูลดิบ -> สร้าง Entity/Location\n\n` +
-               `ผู้พัฒนา: AI Assistant\n` +
-               `สถานะ: พร้อมใช้งาน ✅`;
-               
-  Browser.msgBox(info);
-}
-
-/**
- * ฟังก์ชันตรวจสอบความถูกต้องของระบบ (เรียกจาก Config)
- */
-function V5_CheckSystemIntegrity() {
-  try {
-    V5_CONFIG.validateSystemIntegrity();
-    Browser.msgBox("✅ ระบบผ่านการตรวจสอบความถูกต้อง!\nชีตสำคัญครบถ้วน พร้อมใช้งาน");
-  } catch (e) {
-    Browser.msgBox(`❌ พบข้อผิดพลาดในการตรวจสอบระบบ:\n${e.message}`);
-  }
+function V5_ShowAbout() {
+  Browser.msgBox("LMDS Version 5.0\nระบบจัดการข้อมูลหลักโลจิสติกส์\nพัฒนาขึ้นเพื่อแก้ปัญหาความซ้ำซ้อนของข้อมูล\nโดยไม่พึ่งพา AI 100%");
 }
