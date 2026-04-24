@@ -2,245 +2,287 @@
  * V5_Service_Daily_Match.gs
  * Version: 5.0
  * Description: The bridge between Part 1 (Daily Data) and Part 2 (Clean Master Data).
- *              Reads 'Data' sheet, matches names/coords against Entities/Locations, 
- *              and fills in LatLong_Actual and Employee Email.
+ *              Matches incoming shipment data against Entities/Locations to fill LatLong_Actual and Employee Email.
  */
 
-function V5_MatchDailyData() {
+function V5_ProcessDailyMatching() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const dataSheet = ss.getSheetByName(V5_CONFIG.SHEETS.DATA);
   const empSheet = ss.getSheetByName(V5_CONFIG.SHEETS.EMPLOYEE);
   
   if (!dataSheet || !empSheet) {
-    Browser.msgBox("❌ ไม่พบชีต Data หรือ ข้อมูลพนักงาน");
+    Browser.msgBox("❌ ไม่พบชีต 'Data' หรือ 'ข้อมูลพนักงาน'");
     return;
   }
 
+  // ดึงข้อมูลทั้งหมดจากชีต Data
   const data = dataSheet.getDataRange().getValues();
   const headers = data[0];
   
-  // หาตำแหน่งคอลัมน์ในชีต Data แบบ Dynamic
+  // หาตำแหน่งคอลัมน์ในชีต Data (Dynamic)
   const colMap = {
     shipToName: headers.indexOf("ShipToName") + 1,
     latLongSCG: headers.indexOf("LatLong_SCG") + 1,
     address: headers.indexOf("ShipToAddress") + 1,
-    driverName: headers.indexOf("DriverName") + 1, // ใช้หา Email พนักงาน
-    truckLicense: headers.indexOf("TruckLicense") + 1,
-    
-    // คอลัมน์ที่จะเขียนผลลัพธ์
+    driverName: headers.indexOf("DriverName") + 1, // สำหรับหาอีเมลพนักงาน
     latLongActual: headers.indexOf("LatLong_Actual") + 1,
-    employeeEmail: headers.indexOf("Email พนักงาน") + 1,
-    matchedEntityId: headers.indexOf("Matched_Entity_ID") + 1,
-    matchedLocationId: headers.indexOf("Matched_Location_ID") + 1,
-    matchConfidence: headers.indexOf("Match_Confidence") + 1 // เพิ่มคอลัมน์นี้ถ้ายังไม่มี
+    emailCol: headers.indexOf("Email พนักงาน") + 1,
+    // คอลัมน์ใหม่สำหรับเก็บ ID (ถ้ามี)
+    entityIdCol: headers.indexOf("Matched_Entity_ID") + 1,
+    locationIdCol: headers.indexOf("Matched_Location_ID") + 1
   };
 
-  // ตรวจสอบว่าคอลัมน์สำคัญมีหรือไม่
   if (colMap.shipToName === 0 || colMap.latLongSCG === 0) {
-    Browser.msgBox("❌ ไม่พบคอลัมน์ ShipToName หรือ LatLong_SCG ในชีต Data");
+    Browser.msgBox("❌ ไม่พบคอลัมน์ 'ShipToName' หรือ 'LatLong_SCG' ในชีต Data");
     return;
   }
 
   // โหลดข้อมูลพนักงานเข้า Memory (Map) เพื่อความเร็ว
-  const empData = empSheet.getDataRange().getValues();
-  const empMap = {}; // Key: ทะเบียนรถ หรือ ชื่อคนขับ, Value: Email
-  // สมมติว่าค้นหารายการพนักงานจาก "ทะเบียนรถ" หรือ "ชื่อ-นามสกุล"
-  // ในที่นี้ขอสมมติว่าใช้ "ทะเบียนรถ" เป็นหลักในการจับคู่ email
-  const empColRegis = empData[0].indexOf("ทะเบียนรถ") + 1;
-  const empColEmail = empData[0].indexOf("Email พนักงาน") + 1;
+  const employeeMap = V5_BuildEmployeeMap(empSheet);
+
+  // โหลดข้อมูล Master Data เข้า Memory (Cache) เพื่อความเร็วในการค้นหา
+  // หมายเหตุ: ในระบบจริงที่มีข้อมูลหลักแสนแถว อาจต้องใช้วิธีค้นหาแบบทีละน้อยหรือใช้ Cache Service
+  // แต่สำหรับ Google Sheets ปกติ การโหลดมาทั้ง Sheet ยังพอทำได้หากไม่เกิน 5-10 พันแถว
+  const entSheet = ss.getSheetByName(V5_CONFIG.SHEETS.ENTITIES);
+  const locSheet = ss.getSheetByName(V5_CONFIG.SHEETS.LOCATIONS);
+  const mapSheet = ss.getSheetByName(V5_CONFIG.SHEETS.MAP);
+  const aliasSheet = ss.getSheetByName(V5_CONFIG.SHEETS.NAME_MAPPING);
   
-  for (let i = 1; i < empData.length; i++) {
-    const regis = empData[i][empColRegis - 1];
-    const email = empData[i][empColEmail - 1];
-    if (regis) empMap[regis.toString().trim()] = email;
-  }
+  const masterCache = {
+    entities: entSheet.getDataRange().getValues(),
+    locations: locSheet.getDataRange().getValues(),
+    maps: mapSheet.getDataRange().getValues(),
+    aliases: aliasSheet ? aliasSheet.getDataRange().getValues() : []
+  };
 
   let matchCount = 0;
-  let conflictCount = 0;
   let noMatchCount = 0;
-  
-  // เตรียม Array สำหรับเขียนกลับแบบ Batch (เพื่อความเร็ว)
-  // เราจะอัปเดตหลายคอลัมน์พร้อมกัน
-  const updates = []; 
+  const updates = []; // รวบรวมผลเพื่อเขียนทีเดียว
 
-  Logger.log(`เริ่มจับคู่ข้อมูลรายวัน แถวที่ 2 ถึง ${data.length}`);
+  Logger.log(`เริ่มจับคู่ข้อมูลรายวัน จำนวน ${data.length - 1} แถว...`);
 
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
     const shipToName = row[colMap.shipToName - 1];
     const latLongStr = row[colMap.latLongSCG - 1];
     const address = row[colMap.address - 1] || "";
-    const driverRegis = row[colMap.truckLicense - 1] ? row[colMap.truckLicense - 1].toString().trim() : "";
+    const driverName = row[colMap.driverName - 1] || "";
 
-    // ถ้าไม่มีชื่อปลายทาง ข้ามไป
-    if (!shipToName) {
-      updates.push({ row: i + 1, updates: [] });
-      continue;
-    }
+    let finalLatLong = "";
+    let matchedEntityId = "";
+    let matchedLocationId = "";
+    let isMatched = false;
 
-    let resultEntityId = "";
-    let resultLocationId = "";
-    let resultLatLong = "";
-    let resultConfidence = 0;
-    let statusLog = "";
+    // 1. พยายามจับคู่กับ Master Data ใหม่ (Part 2)
+    if (shipToName) {
+      const latLngParts = latLongStr ? latLongStr.split(',') : [null, null];
+      const lat = latLngParts[0] ? parseFloat(latLngParts[0]) : null;
+      const lng = latLngParts[1] ? parseFloat(latLngParts[1]) : null;
 
-    // --- 1. ค้นหาจากฐานข้อมูลใหม่ (Part 2) ---
-    // แยก Lat/Long จากสตริง
-    let lat = null, lng = null;
-    if (latLongStr && latLongStr.includes(",")) {
-      const parts = latLongStr.split(",");
-      lat = parseFloat(parts[0]);
-      lng = parseFloat(parts[1]);
-    }
-
-    if (lat && lng) {
-      // เรียกใช้ Core Logic เพื่อค้นหา (แต่ไม่สร้างใหม่ ถ้าไม่มีในฐานข้อมูลหลัก)
-      // หมายเหตุ: V5_ResolveIdentity จะสร้างใหม่ถ้าไม่เจอ ซึ่งอาจจะไม่เหมาะสำหรับ Daily Job ที่ต้องการแค่ "ดึงของที่มีอยู่"
-      // ดังนั้น เราควรสร้างฟังก์ชันเฉพาะสำหรับการ "Search Only" ในไฟล์ Master_Core หรือแก้ไขพฤติกรรมที่นี่
-      // เพื่อให้เข้าใจง่าย ในที่นี้เราจะใช้วิธี Search โดยตรงจากชีต Locations/Entities แทนการ Resolve ที่อาจสร้างขยะ
-      
-      const searchResult = V5_SearchExistingMaster(shipToName, lat, lng, address);
+      // เรียกฟังก์ชันค้นหา (ไม่สร้างใหม่ แค่ค้นหา)
+      const searchResult = V5_SearchBestMatch(shipToName, lat, lng, address, masterCache);
       
       if (searchResult.found) {
-        resultEntityId = searchResult.entityId;
-        resultLocationId = searchResult.locationId;
-        resultLatLong = `${searchResult.lat},${searchResult.lng}`;
-        resultConfidence = searchResult.confidence;
-        statusLog = "MATCHED";
+        matchedEntityId = searchResult.entityId;
+        matchedLocationId = searchResult.locationId;
+        finalLatLong = `${searchResult.lat},${searchResult.lng}`;
+        isMatched = true;
         matchCount++;
       } else {
-        statusLog = "NO_MATCH_IN_MASTER";
         noMatchCount++;
-        // กรณีไม่เจอ: อาจจะทิ้งว่าง หรือ ใช้พิกัด SCG เดิมชั่วคราว (แล้วแต่ความต้องการ)
-        // ในที่นี้ขอทิ้งว่าง LatLong_Actual เพื่อให้รู้ว่ายังไม่ผ่านการตรวจสอบ
-        resultLatLong = ""; 
+        // ถ้าไม่เจอในระบบใหม่ อาจจะลองตกกลับไปใช้ Logic เก่า (ถ้ามี) หรือปล่อยว่างไว้ก่อน
+        // ในที่นี้เราเน้นใช้ระบบใหม่เป็นหลัก
       }
-    } else {
-      statusLog = "MISSING_COORDS";
-      noMatchCount++;
     }
 
-    // --- 2. ค้นหา Email พนักงาน ---
-    let empEmail = "";
-    if (driverRegis && empMap[driverRegis]) {
-      empEmail = empMap[driverRegis];
+    // 2. หาอีเมลพนักงาน
+    let employeeEmail = "";
+    if (driverName && employeeMap[driverName]) {
+      employeeEmail = employeeMap[driverName];
     }
 
-    // --- จัดเก็บผลลัพธ์เพื่อเขียนทีหลัง ---
-    // ลำดับคอลัมน์ต้องตรงกับที่ต้องการจะเขียน
-    // สมมติจะเขียน: LatLong_Actual, Email, Entity_ID, Location_ID, Confidence
-    const rowDataUpdates = [
-      resultLatLong, 
-      empEmail, 
-      resultEntityId, 
-      resultLocationId, 
-      resultConfidence > 0 ? resultConfidence : ""
-    ];
-
-    updates.push({ row: i + 1, updates: rowDataUpdates });
+    // เตรียมข้อมูลสำหรับการอัปเดต (เฉพาะแถวที่มีการเปลี่ยนแปลงหรือต้องการเติมข้อมูล)
+    // เราเขียนเฉพาะคอลัมน์ที่สำคัญ: LatLong_Actual, Email, Entity_ID, Location_ID
+    updates.push([
+      finalLatLong,             // LatLong_Actual
+      employeeEmail,            // Email พนักงาน
+      matchedEntityId,          // Matched_Entity_ID
+      matchedLocationId         // Matched_Location_ID
+    ]);
   }
 
-  // --- เขียนผลลัพธ์ลงชีต Data แบบ Batch ---
-  if (updates.length > 0 && colMap.latLongActual > 0) {
-    // สร้าง Range ใหญ่ทีเดียว
-    // คอลัมน์เริ่มต้นคือ LatLong_Actual, จำนวน 5 คอลัมน์
-    const startRow = updates[0].row;
-    // ต้องระวังเรื่องแถวที่กระโดดกัน อาจต้องใช้วิธีเขียนทีละช่วง หรือเขียนทั้งคอลัมน์
-    // วิธีที่ง่ายและเร็วที่สุดสำหรับ Google Sheets คือการสร้าง Array ให้ครบทุกแถวแล้วเขียนทีเดียว
+  // เขียนผลลัพธ์ลงชีต Data (Batch Write)
+  if (updates.length > 0) {
+    // กำหนดช่วงที่จะเขียน: เริ่มที่แถว 2, คอลัมน์แรกของกลุ่มที่ต้องการเขียน
+    // ลำดับคอลัมน์ที่ต้องเขียนต้องตรงกับลำดับใน updates array
+    // สมมติว่าเราเขียน 4 คอลัมน์ติดกัน หรือต้องระบุทีละช่วงหากคอลัมน์ไม่ติดกัน
     
-    // สร้าง Array ว่างขนาดเท่าจำนวนแถวข้อมูล
-    const outputArray = new Array(data.length - 1).fill([]).map(() => ["", "", "", "", ""]);
+    // วิธีที่ปลอดภัยที่สุดคือเขียนทีละคอลัมน์หากคอลัมน์ไม่อยู่ติดกัน
+    // แต่เพื่อความรวดเร็ว เราจะเขียนเป็นบล็อกหากคอลัมน์อยู่ติดกัน
+    // ในที่นี้สมมติว่าคอลัมน์เหล่านี้可能會อยู่กระจายกัน ดังนั้นควรเขียนแยก
     
-    updates.forEach(u => {
-      const rowIndex = u.row - 2; // ปรับ index ให้ตรงกับ Array (เริ่มที่ 0)
-      if (rowIndex >= 0 && rowIndex < outputArray.length) {
-        outputArray[rowIndex] = u.updates;
-      }
-    });
-
-    const targetRange = dataSheet.getRange(2, colMap.latLongActual, outputArray.length, 5);
-    targetRange.setValues(outputArray);
+    // เขียน LatLong_Actual
+    if (colMap.latLongActual > 0) {
+      const colData = updates.map(r => [r[0]]);
+      dataSheet.getRange(2, colMap.latLongActual, updates.length, 1).setValues(colData);
+    }
+    // เขียน Email
+    if (colMap.emailCol > 0) {
+      const colData = updates.map(r => [r[1]]);
+      dataSheet.getRange(2, colMap.emailCol, updates.length, 1).setValues(colData);
+    }
+    // เขียน Entity ID (ถ้ามีคอลัมน์)
+    if (colMap.entityIdCol > 0) {
+      const colData = updates.map(r => [r[2]]);
+      dataSheet.getRange(2, colMap.entityIdCol, updates.length, 1).setValues(colData);
+    }
+    // เขียน Location ID (ถ้ามีคอลัมน์)
+    if (colMap.locationIdCol > 0) {
+      const colData = updates.map(r => [r[3]]);
+      dataSheet.getRange(2, colMap.locationIdCol, updates.length, 1).setValues(colData);
+    }
   }
 
   const summary = `
 ✅ เสร็จสิ้นการจับคู่ข้อมูลรายวัน!
 ---------------------------
 📊 ทั้งหมด: ${data.length - 1} แถว
-✨ จับคู่สำเร็จ: ${matchCount} รายการ
-⚠️ ไม่พบในฐานข้อมูลหลัก: ${noMatchCount} รายการ (ตรวจสอบ Conflict_Queue หรือ รอ Admin อนุมัติ)
+✅ จับคู่สำเร็จ: ${matchCount} รายการ
+⚠️ ไม่พบข้อมูล: ${noMatchCount} รายการ (อาจต้องตรวจสอบใน Conflict Queue หรือเพิ่มใหม่)
 
-ข้อมูลพิกัดที่สะอาดแล้วและอีเมลพนักงานถูกเติมลงในชีต Data เรียบร้อยแล้ว
+ระบบได้เติม LatLong_Actual และ Email พนักงานเรียบร้อยแล้ว
   `;
   
   Logger.log(summary);
   Browser.msgBox(summary);
 }
 
-/**
- * ฟังก์ชันเสริมสำหรับค้นหาเท่านั้น (ไม่สร้างใหม่)
- * ใช้สำหรับ Daily Job ที่ต้องการดึงข้อมูลที่มีอยู่แล้ว
- */
-function V5_SearchExistingMaster(name, lat, lng, address) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const entSheet = ss.getSheetByName(V5_CONFIG.SHEETS.ENTITIES);
-  const locSheet = ss.getSheetByName(V5_CONFIG.SHEETS.LOCATIONS);
-  const mapSheet = ss.getSheetByName(V5_CONFIG.SHEETS.MAP);
+// --- Helper Functions for Matching ---
+
+function V5_BuildEmployeeMap(sheet) {
+  const data = sheet.getDataRange().getValues();
+  const map = {};
+  // สมมติคอลัมน์: ชื่อ-นามสกุล (2), Email (7) - เช็คจาก Config หรือ Hardcode ตามโครงสร้าง
+  // ใช้ Index จาก Config ถ้ามี หรือนับเอง
+  const colName = 2; 
+  const colEmail = 7;
   
+  for (let i = 1; i < data.length; i++) {
+    const name = data[i][colName - 1];
+    const email = data[i][colEmail - 1];
+    if (name && email) {
+      map[name.trim()] = email;
+      // เพิ่มвариants ของชื่อถ้าจำเป็น (เช่น ตัดคำนำหน้า)
+    }
+  }
+  return map;
+}
+
+function V5_SearchBestMatch(name, lat, lng, address, cache) {
   const cleanName = V5_NormalizeText(name);
   
-  // 1. หา Entity จากชื่อ
-  let entityId = null;
-  const entData = entSheet.getDataRange().getValues();
-  for (let i = 1; i < entData.length; i++) {
-    if (entData[i][V5_CONFIG.COL.ENTITIES.NORM_NAME - 1] === cleanName && 
-        entData[i][V5_CONFIG.COL.ENTITIES.STATUS - 1] === "ACTIVE") {
-      entityId = entData[i][V5_CONFIG.COL.ENTITIES.ID - 1];
+  // 1. ค้นหาจาก Entity Name (Direct Match)
+  const entColNorm = V5_CONFIG.COL.ENTITIES.NORM_NAME - 1;
+  const entColId = V5_CONFIG.COL.ENTITIES.ID - 1;
+  
+  let candidateEntityId = null;
+  
+  // หา Entity ที่ชื่อตรงกัน
+  for (let i = 1; i < cache.entities.length; i++) {
+    if (cache.entities[i][entColNorm] === cleanName) {
+      candidateEntityId = cache.entities[i][entColId];
       break;
     }
   }
   
-  // 2. หา Location จากพิกัด (ในระยะ 200 ม.)
-  let locationId = null;
-  let bestLat = null;
-  let bestLng = null;
-  let minDist = 999999;
-  
-  const locData = locSheet.getDataRange().getValues();
-  for (let i = 1; i < locData.length; i++) {
-    const rLat = locData[i][V5_CONFIG.COL.LOCATIONS.LAT - 1];
-    const rLng = locData[i][V5_CONFIG.COL.LOCATIONS.LNG - 1];
-    if (rLat && rLng) {
-      const dist = V5_CalculateDistanceMeters(lat, lng, rLat, rLng);
-      if (dist <= 200 && dist < minDist) {
-        minDist = dist;
-        locationId = locData[i][V5_CONFIG.COL.LOCATIONS.ID - 1];
-        bestLat = rLat;
-        bestLng = rLng;
+  // ถ้าไม่เจอชื่อตรง ลองหาจาก Alias (NameMapping)
+  if (!candidateEntityId && cache.aliases) {
+    const aliasColName = V5_CONFIG.COL.MAPPING.ALIAS - 1;
+    const aliasColTarget = V5_CONFIG.COL.MAPPING.TARGET_ID - 1;
+    for (let i = 1; i < cache.aliases.length; i++) {
+      if (V5_NormalizeText(cache.aliases[i][aliasColName]) === cleanName) {
+        candidateEntityId = cache.aliases[i][aliasColTarget];
+        break;
       }
     }
   }
-  
-  // 3. ถ้าเจอทั้งคู่ เช็คความสัมพันธ์ใน Map
-  if (entityId && locationId) {
-    const mapData = mapSheet.getDataRange().getValues();
-    for (let i = 1; i < mapData.length; i++) {
-      if (mapData[i][V5_CONFIG.COL.MAP.ENTITY_ID - 1] === entityId && 
-          mapData[i][V5_CONFIG.COL.MAP.LOCATION_ID - 1] === locationId &&
-          mapData[i][V5_CONFIG.COL.MAP.IS_ACTIVE - 1] === true) {
+
+  // 2. ถ้าเจอ Entity แล้ว ให้หา Location ที่เชื่อมอยู่
+  if (candidateEntityId) {
+    const mapColEnt = V5_CONFIG.COL.MAP.ENTITY_ID - 1;
+    const mapColLoc = V5_CONFIG.COL.MAP.LOCATION_ID - 1;
+    const mapColActive = V5_CONFIG.COL.MAP.IS_ACTIVE - 1;
+    
+    for (let i = 1; i < cache.maps.length; i++) {
+      if (cache.maps[i][mapColEnt] === candidateEntityId && cache.maps[i][mapColActive] === true) {
+        const locId = cache.maps[i][mapColLoc];
         
-        return {
-          found: true,
-          entityId: entityId,
-          locationId: locationId,
-          lat: bestLat,
-          lng: bestLng,
-          confidence: 100
-        };
+        // ดึงพิกัดจาก Location ID
+        const locCoords = V5_GetCoordsFromCache(locId, cache.locations);
+        if (locCoords) {
+          return {
+            found: true,
+            entityId: candidateEntityId,
+            locationId: locId,
+            lat: locCoords.lat,
+            lng: locCoords.lng,
+            confidence: 100
+          };
+        }
       }
     }
   }
-  
-  // กรณีเจอแค่อย่างใดอย่างหนึ่ง อาจจะต้องใช้ Logic ย่อยๆ เพิ่มเติม (เช่น ใช้ชื่อหาพิกัดโดยประมาณ)
-  // แต่ในที่นี้ขอคืนค่า Not Found ไปก่อนเพื่อความชัวร์ของข้อมูล
+
+  // 3. Fallback: ถ้าไม่เจอชื่อ แต่มีพิกัด ให้ลองหา Location ที่ใกล้ที่สุด (ภายในระยะที่กำหนด)
+  if (lat && lng) {
+    const locColLat = V5_CONFIG.COL.LOCATIONS.LAT - 1;
+    const locColLng = V5_CONFIG.COL.LOCATIONS.LNG - 1;
+    const locColId = V5_CONFIG.COL.LOCATIONS.ID - 1;
+    
+    let bestDist = 999999;
+    let bestLocId = null;
+    let bestCoords = null;
+    
+    // หาระยะทางกับทุก Location (อาจช้าถ้าข้อมูลเยอะมาก ควรทำ Index หรือจำกัดขอบเขต)
+    // สำหรับการเริ่มต้น วนลูปได้เลย
+    for (let i = 1; i < cache.locations.length; i++) {
+      const rLat = cache.locations[i][locColLat];
+      const rLng = cache.locations[i][locColLng];
+      
+      if (rLat && rLng) {
+        const dist = V5_CalculateDistanceMeters(lat, lng, rLat, rLng);
+        if (dist < 50 && dist < bestDist) { // ระยะห่างไม่เกิน 50 เมตร ถือว่าใกล้ enough สำหรับ Fallback
+          bestDist = dist;
+          bestLocId = cache.locations[i][locColId];
+          bestCoords = { lat: rLat, lng: rLng };
+        }
+      }
+    }
+    
+    if (bestLocId) {
+      return {
+        found: true,
+        entityId: "", // ไม่รู้ Entity แน่นอน
+        locationId: bestLocId,
+        lat: bestCoords.lat,
+        lng: bestCoords.lng,
+        confidence: 80 // ความมั่นใจลดลงเพราะจับจากพิกัดล้วนๆ
+      };
+    }
+  }
+
   return { found: false };
+}
+
+function V5_GetCoordsFromCache(locationId, locationsData) {
+  const colId = V5_CONFIG.COL.LOCATIONS.ID - 1;
+  const colLat = V5_CONFIG.COL.LOCATIONS.LAT - 1;
+  const colLng = V5_CONFIG.COL.LOCATIONS.LNG - 1;
+  
+  for (let i = 1; i < locationsData.length; i++) {
+    if (locationsData[i][colId] === locationId) {
+      return { lat: locationsData[i][colLat], lng: locationsData[i][colLng] };
+    }
+  }
+  return null;
 }
